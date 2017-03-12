@@ -83,8 +83,7 @@ export class ListView<T> implements IDisposable {
 			alwaysConsumeMouseWheel: true,
 			horizontal: ScrollbarVisibility.Hidden,
 			vertical: ScrollbarVisibility.Auto,
-			useShadows: getOrDefault(options, o => o.useShadows, DefaultOptions.useShadows),
-			saveLastScrollTimeOnClassName: 'monaco-list-row'
+			useShadows: getOrDefault(options, o => o.useShadows, DefaultOptions.useShadows)
 		});
 
 		this._domNode.appendChild(this.scrollableElement.getDomNode());
@@ -233,16 +232,20 @@ export class ListView<T> implements IDisposable {
 		let domNode = this.domNode;
 
 		if (MouseEventTypes.indexOf(type) > -1) {
-			handler = e => this.fireScopedEvent(userHandler, this.getItemIndexFromMouseEvent(e));
+			handler = e => this.fireScopedEvent(e, userHandler, this.getItemIndexFromMouseEvent(e));
 		} else if (type === TouchEventType.Tap) {
 			domNode = this.rowsContainer;
-			handler = e => this.fireScopedEvent(userHandler, this.getItemIndexFromGestureEvent(e));
+			handler = e => this.fireScopedEvent(e, userHandler, this.getItemIndexFromGestureEvent(e));
 		}
 
 		return DOM.addDisposableListener(domNode, type, handler, useCapture);
 	}
 
-	private fireScopedEvent(handler: (event: any) => void, index: number) {
+	private fireScopedEvent(
+		event: any,
+		handler: (event: any) => void,
+		index: number
+	) {
 		if (index < 0) {
 			return;
 		}
@@ -255,11 +258,11 @@ export class ListView<T> implements IDisposable {
 		this.render(e.scrollTop, e.height);
 	}
 
-	private onTouchChange(e: GestureEvent): void {
+	private onTouchChange(event: GestureEvent): void {
 		event.preventDefault();
 		event.stopPropagation();
 
-		this.scrollTop -= e.translationY;
+		this.scrollTop -= event.translationY;
 	}
 
 	// Util

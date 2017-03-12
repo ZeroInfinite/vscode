@@ -8,6 +8,12 @@ import { IConfigurationService } from 'vs/platform/configuration/common/configur
 import { ITerminalConfiguration, ITerminalConfigHelper, ITerminalFont, IShellLaunchConfig } from 'vs/workbench/parts/terminal/common/terminal';
 import { Platform } from 'vs/base/common/platform';
 
+interface IFullTerminalConfiguration {
+	terminal: {
+		integrated: ITerminalConfiguration;
+	};
+}
+
 const DEFAULT_LINE_HEIGHT = 1.2;
 
 const DEFAULT_ANSI_COLORS = {
@@ -75,10 +81,15 @@ export class TerminalConfigHelper implements ITerminalConfigHelper {
 	public panelContainer: HTMLElement;
 
 	private _charMeasureElement: HTMLElement;
+	private _lastFontMeasurement: ITerminalFont;
 
 	public constructor(
 		private _platform: Platform,
 		@IConfigurationService private _configurationService: IConfigurationService) {
+	}
+
+	public get config(): ITerminalConfiguration {
+		return this._configurationService.getConfiguration<IFullTerminalConfiguration>().terminal.integrated;
 	}
 
 	public getTheme(baseThemeId: string): string[] {
@@ -99,15 +110,20 @@ export class TerminalConfigHelper implements ITerminalConfigHelper {
 		this._charMeasureElement.innerText = 'X';
 		const rect = this._charMeasureElement.getBoundingClientRect();
 		style.display = 'none';
-		const charWidth = rect.width;
-		const charHeight = rect.height;
-		return {
+
+		// Bounding client rect was invalid, use last font measurement if available.
+		if (this._lastFontMeasurement && !rect.width && !rect.height) {
+			return this._lastFontMeasurement;
+		}
+
+		this._lastFontMeasurement = {
 			fontFamily,
 			fontSize: fontSize + 'px',
 			lineHeight,
-			charWidth,
-			charHeight
+			charWidth: rect.width,
+			charHeight: rect.height
 		};
+		return this._lastFontMeasurement;
 	}
 
 	/**
@@ -117,7 +133,7 @@ export class TerminalConfigHelper implements ITerminalConfigHelper {
 	public getFont(): ITerminalFont {
 		const config = this._configurationService.getConfiguration();
 		const editorConfig = (<IEditorConfiguration>config).editor;
-		const terminalConfig = (<ITerminalConfiguration>config).terminal.integrated;
+		const terminalConfig = this.config;
 
 		const fontFamily = terminalConfig.fontFamily || editorConfig.fontFamily;
 		let fontSize = this._toInteger(terminalConfig.fontSize, 0);
@@ -132,71 +148,24 @@ export class TerminalConfigHelper implements ITerminalConfigHelper {
 		return this._measureFont(fontFamily, fontSize, lineHeight);
 	}
 
-	public getFontLigaturesEnabled(): boolean {
-		const terminalConfig = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return terminalConfig.terminal.integrated.fontLigatures;
-	}
-
-	public getFlowControl(): boolean {
-		const terminalConfig = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return terminalConfig.terminal.integrated.flowControl;
-	}
-
-	public getCursorBlink(): boolean {
-		const terminalConfig = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return terminalConfig.terminal.integrated.cursorBlinking;
-	}
-
-	public getCursorStyle(): string {
-		const terminalConfig = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return terminalConfig.terminal.integrated.cursorStyle;
-	}
-
-	public getRightClickCopyPaste(): boolean {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return config.terminal.integrated.rightClickCopyPaste;
-	}
-
-	public getCommandsToSkipShell(): string[] {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return config.terminal.integrated.commandsToSkipShell;
-	}
-
 	public mergeDefaultShellPathAndArgs(shell: IShellLaunchConfig): IShellLaunchConfig {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
+		const config = this.config;
 
 		shell.executable = '';
 		shell.args = [];
-
-		const integrated = config && config.terminal && config.terminal.integrated;
-		if (integrated && integrated.shell && integrated.shellArgs) {
+		if (config && config.shell && config.shellArgs) {
 			if (this._platform === Platform.Windows) {
-				shell.executable = integrated.shell.windows;
-				shell.args = integrated.shellArgs.windows;
+				shell.executable = config.shell.windows;
+				shell.args = config.shellArgs.windows;
 			} else if (this._platform === Platform.Mac) {
-				shell.executable = integrated.shell.osx;
-				shell.args = integrated.shellArgs.osx;
+				shell.executable = config.shell.osx;
+				shell.args = config.shellArgs.osx;
 			} else if (this._platform === Platform.Linux) {
-				shell.executable = integrated.shell.linux;
-				shell.args = integrated.shellArgs.linux;
+				shell.executable = config.shell.linux;
+				shell.args = config.shellArgs.linux;
 			}
 		}
 		return shell;
-	}
-
-	public getScrollback(): number {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return config.terminal.integrated.scrollback;
-	}
-
-	public isSetLocaleVariables(): boolean {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return config.terminal.integrated.setLocaleVariables;
-	}
-
-	public getCwd(): string {
-		const config = this._configurationService.getConfiguration<ITerminalConfiguration>();
-		return config.terminal.integrated.cwd;
 	}
 
 	private _toInteger(source: any, minimum?: number): number {

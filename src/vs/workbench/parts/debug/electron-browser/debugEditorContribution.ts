@@ -33,6 +33,7 @@ import { DebugHoverWidget } from 'vs/workbench/parts/debug/electron-browser/debu
 import { RemoveBreakpointAction, EditConditionalBreakpointAction, EnableBreakpointAction, DisableBreakpointAction, AddConditionalBreakpointAction } from 'vs/workbench/parts/debug/browser/debugActions';
 import { IDebugEditorContribution, IDebugService, State, IBreakpoint, EDITOR_CONTRIBUTION_ID, CONTEXT_BREAKPOINT_WIDGET_VISIBLE, IStackFrame, IDebugConfiguration, IExpression } from 'vs/workbench/parts/debug/common/debug';
 import { BreakpointWidget } from 'vs/workbench/parts/debug/browser/breakpointWidget';
+import { ExceptionWidget } from 'vs/workbench/parts/debug/browser/exceptionWidget';
 import { FloatingClickWidget } from 'vs/workbench/parts/preferences/browser/preferencesWidgets';
 import { IListService } from 'vs/platform/list/browser/listService';
 
@@ -59,6 +60,8 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 	private breakpointWidgetVisible: IContextKey<boolean>;
 	private wordToLineNumbersMap: Map<string, IPosition[]>;
 
+	private exceptionWidget: ExceptionWidget;
+
 	private configurationWidget: FloatingClickWidget;
 
 	constructor(
@@ -83,6 +86,7 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 		this.breakpointWidgetVisible = CONTEXT_BREAKPOINT_WIDGET_VISIBLE.bindTo(contextKeyService);
 		this.updateConfigurationWidgetVisibility();
 		this.codeEditorService.registerDecorationType(INLINE_VALUE_DECORATION_KEY, {});
+		this.toggleExceptionWidget();
 	}
 
 	private getContextMenuActions(breakpoint: IBreakpoint, uri: uri, lineNumber: number): TPromise<IAction[]> {
@@ -111,11 +115,10 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 
 	private registerListeners(): void {
 		this.toDispose.push(this.editor.onMouseDown((e: IEditorMouseEvent) => {
-			if (e.target.type !== MouseTargetType.GUTTER_GLYPH_MARGIN || /* after last line */ e.target.detail) {
+			if (e.target.type !== MouseTargetType.GUTTER_GLYPH_MARGIN || /* after last line */ e.target.detail || !this.marginFreeFromNonDebugDecorations(e.target.position.lineNumber)) {
 				return;
 			}
 			const canSetBreakpoints = this.debugService.getConfigurationManager().canSetBreakpointsIn(this.editor.getModel());
-
 			const lineNumber = e.target.position.lineNumber;
 			const uri = this.editor.getModel().uri;
 
@@ -146,7 +149,8 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 
 		this.toDispose.push(this.editor.onMouseMove((e: IEditorMouseEvent) => {
 			let showBreakpointHintAtLineNumber = -1;
-			if (e.target.type === MouseTargetType.GUTTER_GLYPH_MARGIN && this.debugService.getConfigurationManager().canSetBreakpointsIn(this.editor.getModel())) {
+			if (e.target.type === MouseTargetType.GUTTER_GLYPH_MARGIN && this.debugService.getConfigurationManager().canSetBreakpointsIn(this.editor.getModel()) &&
+				this.marginFreeFromNonDebugDecorations(e.target.position.lineNumber)) {
 				if (!e.target.detail) {
 					// is not after last line
 					showBreakpointHintAtLineNumber = e.target.position.lineNumber;
@@ -178,6 +182,7 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 			const model = this.editor.getModel();
 			this.editor.updateOptions({ hover: !sf || !model || model.uri.toString() !== sf.source.uri.toString() });
 			this.closeBreakpointWidget();
+			this.toggleExceptionWidget();
 			this.hideHoverWidget();
 			this.updateConfigurationWidgetVisibility();
 			this.wordToLineNumbersMap = null;
@@ -197,6 +202,19 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 			return this.hoverWidget.showAt(range, focus);
 		}
 		return undefined;
+	}
+
+	private marginFreeFromNonDebugDecorations(line: number): boolean {
+		const decorations = this.editor.getLineDecorations(line);
+		if (decorations) {
+			for (const {options} of decorations) {
+				if (options.glyphMarginClassName && options.glyphMarginClassName.indexOf('debug') === -1) {
+					return false;
+				}
+			}
+		}
+
+		return true;
 	}
 
 	private ensureBreakpointHintDecoration(showBreakpointHintAtLineNumber: number): void {
@@ -224,6 +242,9 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 			this.editor.updateOptions({ hover: true });
 			this.hideHoverWidget();
 		}
+
+		// Handling exception
+		this.toggleExceptionWidget();
 
 		this.updateInlineDecorations(sf);
 	}
@@ -277,6 +298,7 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 
 	// end hover business
 
+	// breakpoint widget
 	public showBreakpointWidget(lineNumber: number): void {
 		if (this.breakpointWidget) {
 			this.breakpointWidget.dispose();
@@ -293,6 +315,43 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 			this.breakpointWidget = null;
 			this.breakpointWidgetVisible.reset();
 			this.editor.focus();
+		}
+	}
+
+	// exception widget
+	private toggleExceptionWidget(): void {
+		// Toggles exception widget based on the state of the current editor model and debug stack frame
+		const model = this.editor.getModel();
+		const focusedSf = this.debugService.getViewModel().focusedStackFrame;
+		const callStack = focusedSf ? focusedSf.thread.getCallStack() : null;
+		if (!model || !focusedSf || !callStack || callStack.length === 0) {
+			this.closeExceptionWidget();
+			return;
+		}
+
+		// First call stack frame is the frame where exception has been thrown
+		const exceptionSf = callStack[0];
+		const sameUri = exceptionSf.source.uri.toString() === model.uri.toString();
+		if (this.exceptionWidget && !sameUri) {
+			this.closeExceptionWidget();
+		} else if (focusedSf.thread.stoppedDetails.reason === 'exception' && sameUri) {
+			this.showExceptionWidget(exceptionSf.lineNumber, exceptionSf.column);
+		}
+	}
+
+	private showExceptionWidget(lineNumber: number, column: number): void {
+		if (this.exceptionWidget) {
+			this.exceptionWidget.dispose();
+		}
+
+		this.exceptionWidget = this.instantiationService.createInstance(ExceptionWidget, this.editor, lineNumber);
+		this.exceptionWidget.show({ lineNumber, column }, 0);
+	}
+
+	private closeExceptionWidget(): void {
+		if (this.exceptionWidget) {
+			this.exceptionWidget.dispose();
+			this.exceptionWidget = null;
 		}
 	}
 
@@ -329,6 +388,8 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 				depthInArray--;
 			}
 		});
+
+		this.editor.focus();
 		if (!configurationsPosition) {
 			return this.commandService.executeCommand('editor.action.triggerSuggest');
 		}
@@ -466,6 +527,7 @@ export class DebugEditorContribution implements IDebugEditorContribution {
 					continue;
 				}
 
+				model.forceTokenization(lineNumber);
 				const lineTokens = model.getLineTokens(lineNumber);
 				for (let token = lineTokens.firstToken(); !!token; token = token.next()) {
 					const tokenStr = lineContent.substring(token.startOffset, token.endOffset);

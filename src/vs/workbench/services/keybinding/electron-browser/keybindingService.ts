@@ -7,28 +7,30 @@
 import * as nls from 'vs/nls';
 import { IHTMLContentElement } from 'vs/base/common/htmlContent';
 import { IJSONSchema } from 'vs/base/common/jsonSchema';
-import { Keybinding } from 'vs/base/common/keyCodes';
-import { KeybindingLabels } from 'vs/base/common/keybinding';
+import { ResolvedKeybinding, Keybinding } from 'vs/base/common/keyCodes';
+import { KeybindingLabels, PrintableKeypress, MacUILabelProvider, ClassicUILabelProvider, MacAriaLabelProvider, ClassicAriaLabelProvider } from 'vs/platform/keybinding/common/keybindingLabels';
 import * as platform from 'vs/base/common/platform';
 import { toDisposable } from 'vs/base/common/lifecycle';
 import { ExtensionMessageCollector, ExtensionsRegistry } from 'vs/platform/extensions/common/extensionsRegistry';
 import { Extensions, IJSONContributionRegistry } from 'vs/platform/jsonschemas/common/jsonContributionRegistry';
 import { AbstractKeybindingService } from 'vs/platform/keybinding/common/abstractKeybindingService';
 import { IStatusbarService } from 'vs/platform/statusbar/common/statusbar';
-import { KeybindingResolver, IOSupport } from 'vs/platform/keybinding/common/keybindingResolver';
+import { KeybindingResolver } from 'vs/platform/keybinding/common/keybindingResolver';
 import { ICommandService } from 'vs/platform/commands/common/commands';
 import { IKeybindingEvent, IKeybindingItem, IUserFriendlyKeybinding, KeybindingSource } from 'vs/platform/keybinding/common/keybinding';
-import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { ContextKeyExpr, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { IKeybindingRule, KeybindingsRegistry } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { Registry } from 'vs/platform/platform';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { keybindingsTelemetry } from 'vs/platform/telemetry/common/telemetryUtils';
-import { getNativeLabelProvider, getNativeAriaLabelProvider } from 'vs/workbench/services/keybinding/electron-browser/nativeKeymap';
+import { getCurrentKeyboardLayout, getNativeUIKeyCodeLabelProvider, getNativeAriaKeyCodeLabelProvider } from 'vs/workbench/services/keybinding/electron-browser/nativeKeymap';
 import { IMessageService } from 'vs/platform/message/common/message';
 import { ConfigWatcher } from 'vs/base/node/config';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import * as dom from 'vs/base/browser/dom';
 import { StandardKeyboardEvent } from 'vs/base/browser/keyboardEvent';
+import { NormalizedKeybindingItem } from 'vs/platform/keybinding/common/normalizedKeybindingItem';
+import { KeybindingIO } from 'vs/platform/keybinding/common/keybindingIO';
 
 interface ContributedKeyBinding {
 	command: string;
@@ -117,6 +119,67 @@ let keybindingsExtPoint = ExtensionsRegistry.registerExtensionPoint<ContributedK
 	]
 });
 
+export class FancyResolvedKeybinding extends ResolvedKeybinding {
+
+	private readonly _actual: Keybinding;
+
+	constructor(actual: Keybinding) {
+		super();
+		this._actual = actual;
+	}
+
+	public getLabel(): string {
+		const keyCodeLabelProvider = getNativeUIKeyCodeLabelProvider();
+		const [firstPart, chordPart] = PrintableKeypress.fromKeybinding(this._actual, keyCodeLabelProvider, platform.isMacintosh);
+
+		if (platform.isMacintosh) {
+			return MacUILabelProvider.toLabel(firstPart, chordPart);
+		}
+		return ClassicUILabelProvider.toLabel(firstPart, chordPart);
+	}
+
+	public getAriaLabel(): string {
+		const keyCodeLabelProvider = getNativeAriaKeyCodeLabelProvider();
+		const [firstPart, chordPart] = PrintableKeypress.fromKeybinding(this._actual, keyCodeLabelProvider, platform.isMacintosh);
+
+		if (platform.isMacintosh) {
+			return MacAriaLabelProvider.toLabel(firstPart, chordPart);
+		}
+		return ClassicAriaLabelProvider.toLabel(firstPart, chordPart);
+	}
+
+	public getHTMLLabel(): IHTMLContentElement[] {
+		const keyCodeLabelProvider = getNativeUIKeyCodeLabelProvider();
+		const [firstPart, chordPart] = PrintableKeypress.fromKeybinding(this._actual, keyCodeLabelProvider, platform.isMacintosh);
+
+		if (platform.isMacintosh) {
+			return MacUILabelProvider.toHTMLLabel(firstPart, chordPart);
+		}
+		return ClassicUILabelProvider.toHTMLLabel(firstPart, chordPart);
+	}
+
+	public getElectronAccelerator(): string {
+		if (platform.isWindows) {
+			// electron menus always do the correct rendering on Windows
+			return KeybindingLabels._toElectronAccelerator(this._actual);
+		}
+
+		let usLabel = KeybindingLabels._toUSLabel(this._actual);
+		let label = this.getLabel();
+		if (usLabel !== label) {
+			// electron menus are incorrect in rendering (linux) and in rendering and interpreting (mac)
+			// for non US standard keyboard layouts
+			return null;
+		}
+
+		return KeybindingLabels._toElectronAccelerator(this._actual);
+	}
+
+	public getUserSettingsLabel(): string {
+		return KeybindingLabels.toUserSettingsLabel(this._actual);
+	}
+}
+
 export class WorkbenchKeybindingService extends AbstractKeybindingService {
 
 	private _cachedResolver: KeybindingResolver;
@@ -166,6 +229,10 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 		}));
 
 		keybindingsTelemetry(telemetryService, this);
+		let data = getCurrentKeyboardLayout();
+		telemetryService.publicLog('keyboardLayout', {
+			currentKeyboardLayout: data
+		});
 	}
 
 	private _safeGetConfig(): IUserFriendlyKeybinding[] {
@@ -189,7 +256,9 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 
 	protected _getResolver(): KeybindingResolver {
 		if (!this._cachedResolver) {
-			this._cachedResolver = new KeybindingResolver(KeybindingsRegistry.getDefaultKeybindings(), this._getExtraKeybindings(this._firstTimeComputingResolver));
+			const defaults = KeybindingsRegistry.getDefaultKeybindings().map(k => NormalizedKeybindingItem.fromKeybindingItem(k, true));
+			const overrides = this._getExtraKeybindings(this._firstTimeComputingResolver).map(k => NormalizedKeybindingItem.fromKeybindingItem(k, false));
+			this._cachedResolver = new KeybindingResolver(defaults, overrides);
 			this._firstTimeComputingResolver = false;
 		}
 		return this._cachedResolver;
@@ -205,36 +274,11 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 			});
 		}
 
-		return extraUserKeybindings.map((k, i) => IOSupport.readKeybindingItem(k, i));
+		return extraUserKeybindings.map((k, i) => KeybindingIO.readKeybindingItem(k, i));
 	}
 
-	public getLabelFor(keybinding: Keybinding): string {
-		return KeybindingLabels.toCustomLabel(keybinding, getNativeLabelProvider());
-	}
-
-	public getHTMLLabelFor(keybinding: Keybinding): IHTMLContentElement[] {
-		return KeybindingLabels.toCustomHTMLLabel(keybinding, getNativeLabelProvider());
-	}
-
-	public getAriaLabelFor(keybinding: Keybinding): string {
-		return KeybindingLabels.toCustomLabel(keybinding, getNativeAriaLabelProvider());
-	}
-
-	public getElectronAcceleratorFor(keybinding: Keybinding): string {
-		if (platform.isWindows) {
-			// electron menus always do the correct rendering on Windows
-			return super.getElectronAcceleratorFor(keybinding);
-		}
-
-		let usLabel = KeybindingLabels._toUSLabel(keybinding);
-		let label = this.getLabelFor(keybinding);
-		if (usLabel !== label) {
-			// electron menus are incorrect in rendering (linux) and in rendering and interpreting (mac)
-			// for non US standard keyboard layouts
-			return null;
-		}
-
-		return super.getElectronAcceleratorFor(keybinding);
+	protected _createResolvedKeybinding(kb: Keybinding): ResolvedKeybinding {
+		return new FancyResolvedKeybinding(kb);
 	}
 
 	private _handleKeybindingsExtensionPointUser(isBuiltin: boolean, keybindings: ContributedKeyBinding | ContributedKeyBinding[], collector: ExtensionMessageCollector): boolean {
@@ -287,12 +331,12 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 
 		let desc = {
 			id: command,
-			when: IOSupport.readKeybindingWhen(when),
+			when: ContextKeyExpr.deserialize(when),
 			weight: weight,
-			primary: IOSupport.readKeybinding(key),
-			mac: mac && { primary: IOSupport.readKeybinding(mac) },
-			linux: linux && { primary: IOSupport.readKeybinding(linux) },
-			win: win && { primary: IOSupport.readKeybinding(win) }
+			primary: KeybindingIO.readKeybinding(key),
+			mac: mac && { primary: KeybindingIO.readKeybinding(mac) },
+			linux: linux && { primary: KeybindingIO.readKeybinding(linux) },
+			win: win && { primary: KeybindingIO.readKeybinding(win) }
 		};
 
 		if (!desc.primary && !desc.mac && !desc.linux && !desc.win) {
