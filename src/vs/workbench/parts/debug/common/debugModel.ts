@@ -19,7 +19,7 @@ import { ISuggestion } from 'vs/editor/common/modes';
 import { Position } from 'vs/editor/common/core/position';
 import {
 	ITreeElement, IExpression, IExpressionContainer, IProcess, IStackFrame, IExceptionBreakpoint, IBreakpoint, IFunctionBreakpoint, IModel,
-	IConfig, ISession, IThread, IRawModelUpdate, IScope, IRawStoppedDetails, IEnablement, IRawBreakpoint
+	IConfig, ISession, IThread, IRawModelUpdate, IScope, IRawStoppedDetails, IEnablement, IRawBreakpoint, IExceptionInfo
 } from 'vs/workbench/parts/debug/common/debug';
 import { Source } from 'vs/workbench/parts/debug/common/debugSource';
 import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
@@ -100,17 +100,35 @@ export class ExpressionContainer implements IExpressionContainer {
 
 	public valueChanged: boolean;
 	private _value: string;
+	protected children: TPromise<IExpression[]>;
 
 	constructor(
 		protected process: IProcess,
-		public reference: number,
+		private _reference: number,
 		private id: string,
 		public namedVariables = 0,
 		public indexedVariables = 0,
 		private startOfVariables = 0
 	) { }
 
+	public get reference(): number {
+		return this._reference;
+	}
+
+	public set reference(value: number) {
+		this._reference = value;
+		this.children = undefined; // invalidate children cache
+	}
+
 	public getChildren(): TPromise<IExpression[]> {
+		if (!this.children) {
+			this.children = this.doGetChildren();
+		}
+
+		return this.children;
+	}
+
+	private doGetChildren(): TPromise<IExpression[]> {
 		if (!this.hasChildren) {
 			return TPromise.as([]);
 		}
@@ -362,7 +380,7 @@ export class StackFrame implements IStackFrame {
 	}
 
 	public restart(): TPromise<any> {
-		return this.thread.process.session.restartFrame({ frameId: this.frameId });
+		return this.thread.process.session.restartFrame({ frameId: this.frameId }, this.thread.threadId);
 	}
 
 	public toString(): string {
@@ -370,7 +388,8 @@ export class StackFrame implements IStackFrame {
 	}
 
 	public openInEditor(editorService: IWorkbenchEditorService, preserveFocus?: boolean, sideBySide?: boolean): TPromise<any> {
-		return editorService.openEditor({
+
+		return this.source.name === UNKNOWN_SOURCE_LABEL ? TPromise.as(null) : editorService.openEditor({
 			resource: this.source.uri,
 			description: this.source.origin,
 			options: {
@@ -449,11 +468,13 @@ export class Thread implements IThread {
 
 			return response.body.stackFrames.map((rsf, level) => {
 				if (!rsf) {
-					return new StackFrame(this, 0, new Source({ name: UNKNOWN_SOURCE_LABEL }, true), nls.localize('unknownStack', "Unknown stack location"), null, null);
+					return new StackFrame(this, 0, new Source({ name: UNKNOWN_SOURCE_LABEL }, rsf.presentationHint), nls.localize('unknownStack', "Unknown stack location"), null, null);
 				}
-				let source = rsf.source ? new Source(rsf.source, rsf.source.presentationHint === 'deemphasize') : new Source({ name: UNKNOWN_SOURCE_LABEL }, true);
+				let source = rsf.source ? new Source(rsf.source, rsf.source.presentationHint) : new Source({ name: UNKNOWN_SOURCE_LABEL }, rsf.presentationHint);
 				if (this.process.sources.has(source.uri.toString())) {
-					source = this.process.sources.get(source.uri.toString());
+					const alreadyCreatedSource = this.process.sources.get(source.uri.toString());
+					alreadyCreatedSource.presenationHint = source.presenationHint;
+					source = alreadyCreatedSource;
 				} else {
 					this.process.sources.set(source.uri.toString(), source);
 				}
@@ -467,6 +488,30 @@ export class Thread implements IThread {
 
 			return [];
 		});
+	}
+
+	/**
+	 * Returns exception info promise if the exception was thrown, otherwise null
+	 */
+	public get exceptionInfo(): TPromise<IExceptionInfo> {
+		const session = this.process.session;
+		if (this.stoppedDetails && this.stoppedDetails.reason === 'exception') {
+			if (!session.capabilities.supportsExceptionInfoRequest) {
+				return TPromise.as({
+					description: this.stoppedDetails.text,
+					breakMode: null
+				});
+			}
+
+			return session.exceptionInfo({ threadId: this.threadId }).then(exception => ({
+				id: exception.body.exceptionId,
+				description: exception.body.description,
+				breakMode: exception.body.breakMode,
+				details: exception.body.details
+			}));
+		}
+
+		return TPromise.as(null);
 	}
 
 	public next(): TPromise<any> {
@@ -603,13 +648,22 @@ export class Process implements IProcess {
 			column: position.column,
 			line: position.lineNumber
 		}).then(response => {
-			return response && response.body && response.body.targets ? response.body.targets.map(item => (<ISuggestion>{
-				label: item.label,
-				insertText: item.text || item.label,
-				type: item.type,
-				filterText: item.start && item.length && text.substr(item.start, item.length),
-				overwriteBefore: item.length || overwriteBefore
-			})) : [];
+			const result: ISuggestion[] = [];
+			if (response && response.body && response.body.targets) {
+				response.body.targets.forEach(item => {
+					if (item && item.label) {
+						result.push({
+							label: item.label,
+							insertText: item.text || item.label,
+							type: item.type,
+							filterText: item.start && item.length && text.substr(item.start, item.length).concat(item.label),
+							overwriteBefore: item.length || overwriteBefore
+						});
+					}
+				});
+			}
+
+			return result;
 		}, err => []);
 	}
 }
@@ -811,8 +865,6 @@ export class Model implements IModel {
 			}
 		});
 
-		// Remove duplicate breakpoints. This can happen when an adapter updates a line number of a breakpoint
-		this.breakpoints = distinct(this.breakpoints, bp => bp.uri.toString() + bp.lineNumber);
 		this._onDidChangeBreakpoints.fire();
 	}
 
@@ -875,23 +927,26 @@ export class Model implements IModel {
 	}
 
 	public appendToRepl(output: string | IExpression, severity: severity): void {
-		const previousOutput = this.replElements.length && (this.replElements[this.replElements.length - 1] as OutputElement);
-		if (previousOutput instanceof OutputElement && severity === previousOutput.severity && previousOutput.value === output && output.trim() && output.length > 1) {
-			// we got the same output (but not an empty string when trimmed) so we just increment the counter
-			previousOutput.counter++;
-		} else {
-			if (previousOutput && previousOutput.value === '') {
-				// remove potential empty lines between different output types
-				this.replElements.pop();
-			}
-
-			if (typeof output === 'string') {
-				this.addReplElements(output.split('\n').map(line => new OutputElement(line, severity)));
+		if (typeof output === 'string') {
+			const previousOutput = this.replElements.length && (this.replElements[this.replElements.length - 1] as OutputElement);
+			if (previousOutput instanceof OutputElement && severity === previousOutput.severity && previousOutput.value === output && output.trim() && output.length > 1) {
+				// we got the same output (but not an empty string when trimmed) so we just increment the counter
+				previousOutput.counter++;
 			} else {
-				// TODO@Isidor hack, we should introduce a new type which is an output that can fetch children like an expression
-				(<any>output).severity = severity;
-				this.addReplElements([output]);
+				const toAdd = output.split('\n').map(line => new OutputElement(line, severity));
+				if (previousOutput instanceof OutputElement && severity === previousOutput.severity && toAdd.length) {
+					previousOutput.value += toAdd.shift().value;
+				}
+				if (previousOutput && previousOutput.value === '') {
+					// remove potential empty lines between different output types
+					this.replElements.pop();
+				}
+				this.addReplElements(toAdd);
 			}
+		} else {
+			// TODO@Isidor hack, we should introduce a new type which is an output that can fetch children like an expression
+			(<any>output).severity = severity;
+			this.addReplElements([output]);
 		}
 
 		this._onDidChangeREPLElements.fire();
@@ -972,7 +1027,7 @@ export class Model implements IModel {
 	public deemphasizeSource(uri: uri): void {
 		this.processes.forEach(p => {
 			if (p.sources.has(uri.toString())) {
-				p.sources.get(uri.toString()).deemphasize = true;
+				p.sources.get(uri.toString()).presenationHint = 'deemphasize';
 			}
 		});
 		this._onDidChangeCallStack.fire();

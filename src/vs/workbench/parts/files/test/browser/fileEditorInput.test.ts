@@ -82,15 +82,15 @@ suite('Files - FileEditorInput', () => {
 
 						resolvedModelA.dispose();
 
-						return inputToResolve.resolve(true).then(resolved => {
+						return inputToResolve.resolve(true).then((resolved: TextFileEditorModel) => {
 							assert(resolvedModelA !== resolved); // Different instance, because input got disposed
 
 							let stat = resolved.getStat();
-							return inputToResolve.resolve(true).then(resolved => {
+							return inputToResolve.resolve(true).then((resolved: TextFileEditorModel) => {
 								assert(stat !== resolved.getStat()); // Different stat, because resolve always goes to the server for refresh
 
 								stat = resolved.getStat();
-								return inputToResolve.resolve(false).then(resolved => {
+								return inputToResolve.resolve(false).then((resolved: TextFileEditorModel) => {
 									assert(stat === resolved.getStat()); // Same stat, because not refreshed
 
 									done();
@@ -106,10 +106,15 @@ suite('Files - FileEditorInput', () => {
 	test('matches', function () {
 		const input1 = instantiationService.createInstance(FileEditorInput, toResource.call(this, '/foo/bar/updatefile.js'), void 0);
 		const input2 = instantiationService.createInstance(FileEditorInput, toResource.call(this, '/foo/bar/updatefile.js'), void 0);
+		const input3 = instantiationService.createInstance(FileEditorInput, toResource.call(this, '/foo/bar/other.js'), void 0);
+		const input2Upper = instantiationService.createInstance(FileEditorInput, toResource.call(this, '/foo/bar/UPDATEFILE.js'), void 0);
 
 		assert.strictEqual(input1.matches(null), false);
 		assert.strictEqual(input1.matches(input1), true);
 		assert.strictEqual(input1.matches(input2), true);
+		assert.strictEqual(input1.matches(input3), false);
+
+		assert.strictEqual(input1.matches(input2Upper), false);
 	});
 
 	test('getEncoding/setEncoding', function (done) {

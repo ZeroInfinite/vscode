@@ -38,6 +38,10 @@ import * as corePosition from 'vs/editor/common/core/position';
 import ModeContextKeys = editorCommon.ModeContextKeys;
 import EditorContextKeys = editorCommon.EditorContextKeys;
 
+import { registerThemingParticipant } from 'vs/platform/theme/common/themeService';
+import { editorActiveLinkForeground } from 'vs/platform/theme/common/colorRegistry';
+
+
 export class DefinitionActionConfig {
 
 	constructor(
@@ -69,7 +73,6 @@ export class DefinitionAction extends EditorAction {
 
 			// * remove falsy references
 			// * remove reference at the current pos
-			// * collapse ranges to start pos
 			let result: Location[] = [];
 			for (let i = 0; i < references.length; i++) {
 				let reference = references[i];
@@ -83,7 +86,7 @@ export class DefinitionAction extends EditorAction {
 
 					result.push({
 						uri,
-						range: Range.collapseToStart(range)
+						range
 					});
 				}
 			}
@@ -133,7 +136,7 @@ export class DefinitionAction extends EditorAction {
 		return editorService.openEditor({
 			resource: uri,
 			options: {
-				selection: range,
+				selection: Range.collapseToStart(range),
 				revealIfVisible: !sideBySide
 			}
 		}, sideBySide).then(editor => {
@@ -625,3 +628,10 @@ class GotoDefinitionWithMouseEditorContribution implements editorCommon.IEditorC
 		this.toUnhook = dispose(this.toUnhook);
 	}
 }
+
+registerThemingParticipant((theme, collector) => {
+	let activeLinkForeground = theme.getColor(editorActiveLinkForeground);
+	if (activeLinkForeground) {
+		collector.addRule(`.monaco-editor.${theme.selector} .goto-definition-link { color: ${activeLinkForeground} !important; }`);
+	}
+});

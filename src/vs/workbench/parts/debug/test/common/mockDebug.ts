@@ -15,7 +15,7 @@ export class MockDebugService implements debug.IDebugService {
 		return null;
 	}
 
-	public get onDidChangeState(): Event<void> {
+	public get onDidChangeState(): Event<debug.State> {
 		return null;
 	}
 
@@ -116,6 +116,15 @@ export class MockSession implements debug.ISession {
 		return TPromise.as({
 			body: {
 				stackFrames: []
+			}
+		});
+	}
+
+	public exceptionInfo(args: DebugProtocol.ExceptionInfoArguments): TPromise<DebugProtocol.ExceptionInfoResponse> {
+		return TPromise.as({
+			body: {
+				exceptionId: 'mockExceptionId',
+				breakMode: 'unhandled'
 			}
 		});
 	}

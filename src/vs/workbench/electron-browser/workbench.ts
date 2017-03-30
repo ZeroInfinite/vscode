@@ -52,6 +52,7 @@ import { IConfigurationEditingService } from 'vs/workbench/services/configuratio
 import { ConfigurationEditingService } from 'vs/workbench/services/configuration/node/configurationEditingService';
 import { ContextKeyService } from 'vs/platform/contextkey/browser/contextKeyService';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
+import { IKeybindingEditingService, KeybindingsEditingService } from 'vs/workbench/services/keybinding/common/keybindingEditing';
 import { ContextKeyExpr, RawContextKey, IContextKeyService, IContextKey } from 'vs/platform/contextkey/common/contextkey';
 import { IActivityBarService } from 'vs/workbench/services/activity/common/activityBarService';
 import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
@@ -67,8 +68,6 @@ import { WorkbenchMessageService } from 'vs/workbench/services/message/browser/m
 import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { IQuickOpenService } from 'vs/platform/quickOpen/common/quickOpen';
 import { IClipboardService } from 'vs/platform/clipboard/common/clipboardService';
-import { IWorkbenchThemeService } from 'vs/workbench/services/themes/common/themeService';
-import { WorkbenchThemeService } from 'vs/workbench/services/themes/electron-browser/themeService';
 import { ClipboardService } from 'vs/platform/clipboard/electron-browser/clipboardService';
 import { IEditorGroupService } from 'vs/workbench/services/group/common/groupService';
 import { IHistoryService } from 'vs/workbench/services/history/common/history';
@@ -116,7 +115,6 @@ export interface IWorkbenchStartedInfo {
 	restoreViewletDuration: number;
 	restoreEditorsDuration: number;
 	pinnedViewlets: string[];
-	themeId: string;
 }
 
 export interface IWorkbenchCallbacks {
@@ -163,7 +161,6 @@ export class Workbench implements IPartService {
 	private editorService: WorkbenchEditorService;
 	private viewletService: IViewletService;
 	private contextKeyService: IContextKeyService;
-	private themeService: WorkbenchThemeService;
 	private keybindingService: IKeybindingService;
 	private backupFileService: IBackupFileService;
 	private configurationEditingService: IConfigurationEditingService;
@@ -350,10 +347,9 @@ export class Workbench implements IPartService {
 				if (this.callbacks && this.callbacks.onWorkbenchStarted) {
 					this.callbacks.onWorkbenchStarted({
 						customKeybindingsCount: this.keybindingService.customKeybindingsCount(),
-						restoreViewletDuration: viewletRestoreStopWatch ? viewletRestoreStopWatch.elapsed() : 0,
-						restoreEditorsDuration: editorRestoreStopWatch.elapsed(),
+						restoreViewletDuration: viewletRestoreStopWatch ? Math.round(viewletRestoreStopWatch.elapsed()) : 0,
+						restoreEditorsDuration: Math.round(editorRestoreStopWatch.elapsed()),
 						pinnedViewlets: this.activitybarPart.getPinned(),
-						themeId: this.themeService.getColorTheme().id
 					});
 				}
 
@@ -526,9 +522,8 @@ export class Workbench implements IPartService {
 		this.configurationEditingService = this.instantiationService.createInstance(ConfigurationEditingService);
 		serviceCollection.set(IConfigurationEditingService, this.configurationEditingService);
 
-		// Theme Service
-		this.themeService = this.instantiationService.createInstance(WorkbenchThemeService, document.body);
-		serviceCollection.set(IWorkbenchThemeService, this.themeService);
+		// Keybinding Editing
+		serviceCollection.set(IKeybindingEditingService, this.instantiationService.createInstance(KeybindingsEditingService));
 
 		// Configuration Resolver
 		const workspace = this.contextService.getWorkspace();
@@ -799,6 +794,10 @@ export class Workbench implements IPartService {
 		this.workbenchLayout.layout({ toggleMaximizedPanel: true });
 	}
 
+	public isPanelMaximized(): boolean {
+		return this.workbenchLayout.isPanelMaximized();
+	}
+
 	public getSideBarPosition(): Position {
 		return this.sideBarPosition;
 	}
@@ -817,6 +816,10 @@ export class Workbench implements IPartService {
 		this.sidebarPart.getContainer().removeClass(oldPositionValue);
 		this.activitybarPart.getContainer().addClass(newPositionValue);
 		this.sidebarPart.getContainer().addClass(newPositionValue);
+
+		// Update Styles
+		this.activitybarPart.updateStyles();
+		this.sidebarPart.updateStyles();
 
 		// Layout
 		this.workbenchLayout.layout();
@@ -970,11 +973,6 @@ export class Workbench implements IPartService {
 			this.workbench.addClass('nopanel');
 		}
 
-		// Apply no-workspace state as CSS class
-		if (!this.contextService.hasWorkspace()) {
-			this.workbench.addClass('no-workspace');
-		}
-
 		// Apply title style if shown
 		const titleStyle = this.getCustomTitleBarStyle();
 		if (titleStyle) {
@@ -1033,7 +1031,7 @@ export class Workbench implements IPartService {
 	private createPanelPart(): void {
 		const panelPartContainer = $(this.workbench)
 			.div({
-				'class': ['part', 'panel', 'monaco-editor-background'],
+				'class': ['part', 'panel'],
 				id: Identifiers.PANEL_PART,
 				role: 'complementary'
 			});
@@ -1044,7 +1042,7 @@ export class Workbench implements IPartService {
 	private createEditorPart(): void {
 		const editorContainer = $(this.workbench)
 			.div({
-				'class': ['part', 'editor', 'monaco-editor-background', 'empty'],
+				'class': ['part', 'editor', 'empty'],
 				id: Identifiers.EDITOR_PART,
 				role: 'main'
 			});
@@ -1147,6 +1145,21 @@ export class Workbench implements IPartService {
 			this.windowService.toggleFullScreen().done(undefined, errors.onUnexpectedError);
 		}
 	}
+
+	// Resize requested part along the main axis
+	// layout will do all the math for us and adjusts the other Parts
+	public resizePart(part: Parts, sizeChange: number): void {
+		switch (part) {
+			case Parts.SIDEBAR_PART:
+			case Parts.PANEL_PART:
+			case Parts.EDITOR_PART:
+				this.workbenchLayout.resizePart(part, sizeChange);
+				break;
+			default:
+				return; // Cannot resize other parts
+		}
+	}
+
 
 	private shouldRestoreLastOpenedViewlet(): boolean {
 		if (!this.environmentService.isBuilt) {

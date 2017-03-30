@@ -26,6 +26,13 @@ class SCMInput implements ISCMInput {
 
 	private _onDidChange = new Emitter<string>();
 	get onDidChange(): Event<string> { return this._onDidChange.event; }
+
+	private _onDidAccept = new Emitter<string>();
+	get onDidAccept(): Event<string> { return this._onDidAccept.event; }
+
+	acceptChanges(): void {
+		this._onDidAccept.fire(this._value);
+	}
 }
 
 export class SCMService implements ISCMService {
@@ -34,7 +41,6 @@ export class SCMService implements ISCMService {
 
 	private providerChangeDisposable: IDisposable = EmptyDisposable;
 	private activeProviderContextKey: IContextKey<string | undefined>;
-	private activeProviderStateContextKey: IContextKey<string | undefined>;
 
 	private _activeProvider: ISCMProvider | undefined;
 
@@ -52,11 +58,9 @@ export class SCMService implements ISCMService {
 		}
 
 		this._activeProvider = provider;
-		this.activeProviderContextKey.set(provider ? provider.id : void 0);
+		this.activeProviderContextKey.set(provider ? provider.contextKey : void 0);
 
 		this.providerChangeDisposable.dispose();
-		this.providerChangeDisposable = provider.onDidChange(this.onDidChangeProviderState, this);
-		this.onDidChangeProviderState();
 
 		this._onDidChangeProvider.fire(provider);
 	}
@@ -74,7 +78,6 @@ export class SCMService implements ISCMService {
 		@IContextKeyService contextKeyService: IContextKeyService
 	) {
 		this.activeProviderContextKey = contextKeyService.createKey<string | undefined>('scmProvider', void 0);
-		this.activeProviderStateContextKey = contextKeyService.createKey<string | undefined>('scmProviderState', void 0);
 	}
 
 	registerSCMProvider(provider: ISCMProvider): IDisposable {
@@ -97,9 +100,5 @@ export class SCMService implements ISCMService {
 				this.activeProvider = this._providers[0];
 			}
 		});
-	}
-
-	private onDidChangeProviderState(): void {
-		this.activeProviderStateContextKey.set(this.activeProvider.state);
 	}
 }
